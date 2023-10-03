@@ -662,6 +662,7 @@
                             // Optimization introduced by optimum to reuse past key values. So, we just replace the constant
                             t.dispose();
                         } else {
+                            feed[newName].dispose();
                             feed[newName] = t;
                         }
                     }
@@ -693,7 +694,7 @@
 
             if (config.provider == "webgpu" && config.io_binding) {
                 await apply_io_binding(sess, opt, feed);
-                sess = undefined;
+                sess.release();
                 sess = await ort.InferenceSession.create(model_bytes, opt);
             }
 
@@ -710,21 +711,37 @@
                 return;
             }
 
-            log("warmup...");
-            await sleep(200);
-            {
-                const start = performance.now();
-                let outputs = await sess.run(clone(feed));
-                log(`1st run took ${((performance.now() - start)).toFixed(2)}ms`);
-                if (config.verbose) {
-                    console.log(outputs);
-                }
-                for (var i = 0; i < 4; i++) {
-                    outputs = await sess.run(clone(feed));
+            const runOnce = async (iteration = 10) => {
+                const feed = make_inputs(config.gen, sess.inputNames, config);
+
+                for (let i = 0; i < iteration; i++) {
+                    const outputs = await sess.run(feed);
                     if (config.io_binding) {
                         copy_kv_caches(feed, outputs);
                     }
                 }
+
+                for (const [name, t] of Object.entries(feed)) {
+                    t.dispose();
+                }
+            };
+
+            log("warmup...");
+            await sleep(200);
+            {
+                const start = performance.now();
+                // let outputs = await sess.run(clone(feed));
+                await runOnce();
+                log(`1st run took ${((performance.now() - start)).toFixed(2)}ms`);
+                if (config.verbose) {
+                    console.log(outputs);
+                }
+                // for (var i = 0; i < 4; i++) {
+                //     outputs = await sess.run(clone(feed));
+                //     if (config.io_binding) {
+                //         copy_kv_caches(feed, outputs);
+                //     }
+                // }
             }
 
             log("running...");
@@ -738,12 +755,13 @@
 
             do {
                 const start = performance.now();
-                const outputs = await sess.run(clone(feed));
+                await runOnce();
+                // const outputs = await sess.run(clone(feed));
                 now = performance.now();
                 durations.push(now - start);
-                if (config.io_binding) {
-                    copy_kv_caches(feed, outputs);
-                }
+                // if (config.io_binding) {
+                //     copy_kv_caches(feed, outputs);
+                // }
                 query_count++;
                 const pct_new = Math.min((100 * query_count) / config.min_query_count, (100 - (100 * (end_time - now)) / config.min_query_time));
                 if (pct_last + 5 < pct_new) {
